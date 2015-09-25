@@ -18,8 +18,9 @@ public class CustomerService {
      * 获取客户列表
      */
     public List<Customer> getCustomerList(String keyworkd) {
-        //TODO
-        return null;
+        keyworkd="%"+keyworkd+"%";
+        String sql = "SELECT * FROM customer where name like ?";
+        return DatabaseHelper.queryEntityList(Customer.class, sql,keyworkd);
     }
 
     /**

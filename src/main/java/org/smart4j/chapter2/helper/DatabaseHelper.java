@@ -1,5 +1,6 @@
 package org.smart4j.chapter2.helper;
 
+import org.apache.commons.dbcp2.BasicDataSource;
 import org.apache.commons.dbutils.QueryRunner;
 import org.apache.commons.dbutils.handlers.BeanHandler;
 import org.apache.commons.dbutils.handlers.BeanListHandler;
@@ -9,8 +10,11 @@ import org.slf4j.LoggerFactory;
 import org.smart4j.chapter2.util.CollectionUtil;
 import org.smart4j.chapter2.util.PropsUtil;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,26 +25,27 @@ import java.util.Properties;
  * 数据库操作助手
  */
 public final class DatabaseHelper {
-    private static final QueryRunner QUERY_RUNNER = new QueryRunner();
+    private static final QueryRunner QUERY_RUNNER;
 
-    private static final ThreadLocal<Connection> CONNECTION_HOLDER = new ThreadLocal<>();
+    private static final ThreadLocal<Connection> CONNECTION_HOLDER;
+
+    private static final BasicDataSource DATA_SOURCE;
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseHelper.class);
-    private static final String DRIVER;
-    private static final String URL;
-    private static final String USERNAME;
-    private static final String PASSWORD;
 
     static {
+        QUERY_RUNNER = new QueryRunner();
+        CONNECTION_HOLDER = new ThreadLocal<>();
         Properties properties = PropsUtil.loadProps("config.properties");
-        DRIVER = PropsUtil.getString(properties, "jdbc.driver");
-        URL = PropsUtil.getString(properties, "jdbc.url");
-        USERNAME = PropsUtil.getString(properties, "jdbc.username");
-        PASSWORD = PropsUtil.getString(properties, "jdbc.password");
-        try {
-            Class.forName(DRIVER);
-        } catch (ClassNotFoundException e) {
-            LOGGER.error("can not load jdbc driver", e);
-        }
+        String DRIVER = PropsUtil.getString(properties, "jdbc.driver");
+        String URL = PropsUtil.getString(properties, "jdbc.url");
+        String USERNAME = PropsUtil.getString(properties, "jdbc.username");
+        String PASSWORD = PropsUtil.getString(properties, "jdbc.password");
+
+        DATA_SOURCE = new BasicDataSource();
+        DATA_SOURCE.setDriverClassName(DRIVER);
+        DATA_SOURCE.setUrl(URL);
+        DATA_SOURCE.setUsername(USERNAME);
+        DATA_SOURCE.setPassword(PASSWORD);
     }
 
     /**
@@ -50,7 +55,7 @@ public final class DatabaseHelper {
         Connection connection = CONNECTION_HOLDER.get();
         if (connection == null) {
             try {
-                connection = DriverManager.getConnection(URL, USERNAME, PASSWORD);
+                connection = DATA_SOURCE.getConnection();
             } catch (SQLException e) {
                 LOGGER.error("get connection failure", e);
                 throw new RuntimeException(e);
@@ -61,22 +66,6 @@ public final class DatabaseHelper {
         return connection;
     }
 
-    /**
-     * 关闭数据库链接
-     */
-    public static void closeConnection() {
-        Connection connection = CONNECTION_HOLDER.get();
-        if (connection != null) {
-            try {
-                connection.close();
-            } catch (SQLException e) {
-                LOGGER.error("close connection failure", e);
-                throw new RuntimeException(e);
-            } finally {
-                CONNECTION_HOLDER.remove();
-            }
-        }
-    }
 
     /**
      * 查询实体列表
@@ -89,8 +78,6 @@ public final class DatabaseHelper {
         } catch (SQLException e) {
             LOGGER.error("query entity list failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
         return entityList;
     }
@@ -101,14 +88,12 @@ public final class DatabaseHelper {
     public static <T> T queryEntity(Class<T> entityClass, Object... params) {
         T entity;
         Connection conn = getConnection();
-        String sql="SELECT * FROM "+getTableName(entityClass)+" WHERE ID=?";
+        String sql = "SELECT * FROM " + getTableName(entityClass) + " WHERE ID=?";
         try {
             entity = QUERY_RUNNER.query(conn, sql, new BeanHandler<T>(entityClass), params);
         } catch (SQLException e) {
             LOGGER.error("query entity failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
         return entity;
     }
@@ -123,8 +108,6 @@ public final class DatabaseHelper {
         } catch (SQLException e) {
             LOGGER.error("executy query failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
         return result;
     }
@@ -134,13 +117,12 @@ public final class DatabaseHelper {
      */
     public static int executeUpdate(String sql, Object... params) {
         int rows = 0;
+        LOGGER.debug("execute update sql {}",sql);
         try {
             rows = QUERY_RUNNER.update(getConnection(), sql, params);
         } catch (SQLException e) {
             LOGGER.error("execute update failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
         return rows;
     }
@@ -175,25 +157,39 @@ public final class DatabaseHelper {
             LOGGER.error("can not update entity : fieldMap is empty");
             return false;
         }
-        String sql = "UPDATE "+getTableName(entityClass)+" SET ";
-        StringBuilder columns=new StringBuilder();
-        for (String fieldName:fieldMap.keySet()){
-            columns.append(fieldMap).append("=?, ");
+        String sql = "UPDATE " + getTableName(entityClass) + " SET ";
+        StringBuilder columns = new StringBuilder();
+        for (String fieldName : fieldMap.keySet()) {
+            columns.append(fieldName).append("=?, ");
         }
-        sql+=columns.substring(0,columns.lastIndexOf(", "))+" WHERE ID=?";
-        List<Object> paramList= new ArrayList<>();
-        paramList.add(fieldMap.values());
+        sql += columns.substring(0, columns.lastIndexOf(", ")) + " WHERE ID=?";
+        List<Object> paramList = new ArrayList<>();
+        paramList.addAll(fieldMap.values());
         paramList.add(id);
-        Object[] params=paramList.toArray();
-        return executeUpdate(sql,params)==1;
+        Object[] params = paramList.toArray();
+        return executeUpdate(sql, params) == 1;
     }
 
     /**
-     *删除实体
+     * 删除实体
      */
-    public static <T> boolean deleteEntity(Class<T> entityClass,long id){
-        String sql = "DELETE FROM "+getTableName(entityClass)+"WHERE ID=?";
-        return executeUpdate(sql,id)==1;
+    public static <T> boolean deleteEntity(Class<T> entityClass, long id) {
+        String sql = "DELETE FROM " + getTableName(entityClass) + " WHERE ID=?";
+        return executeUpdate(sql, id) == 1;
+    }
+
+    /**
+     * 执行SQL文件
+     */
+    public static void executeSqlFIle(String file) {
+        LOGGER.debug("fileName is {}",Paths.get(ClassLoader.getSystemResource("") + file).getFileName());
+        try {
+            Files.lines(Paths.get(ClassLoader.getSystemResource(file).getPath()), StandardCharsets.UTF_8).forEach(
+                    DatabaseHelper::executeUpdate
+            );
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
 
