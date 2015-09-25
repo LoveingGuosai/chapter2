@@ -4,7 +4,7 @@ import javax.servlet.annotation.WebServlet;
 import java.io.IOException;
 
 /**
- * Created by qiyang on 15-9-21.
+ * 创建客户Servlet
  */
 @WebServlet("/customer_create")
 public class CustomerCreateServlet extends javax.servlet.http.HttpServlet {
